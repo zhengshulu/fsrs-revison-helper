@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FSRS _iCloud同步+本地保存（支持图片）</title>
+<style>
+  *{box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,Roboto}
+  body{margin:0;padding:12px;background:#f8f9fc;}
+  .container{max-width:700px;margin:0 auto;}
+  .card{background:#fff;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 2px 8px rgba(0,0,0,0.06);}
+  h2{font-size:20px;margin:8px 0 16px;color:#222;}
+  h3{font-size:16px;margin:8px 0;color:#333;}
+  .subject-group {margin:18px 0 10px 0;padding:8px 12px;border-left:4px solid #636f81;background:#f8fafc;border-radius:0 8px 8px 0;font-size:15px;font-weight:600;color:#333;}
+  input,textarea{width:100%;margin:6px 0;padding:10px 12px;border:1px solid #e2e8f0;border-radius:12px;font-size:15px;}
+  textarea{resize:vertical;min-height:80px;}
+  button{border:none;border-radius:12px;padding:10px 14px;font-size:14px;cursor:pointer;margin:3px;}
+  .btn-primary{background:#636f81;color:white;}
+  .btn-review{background:#10b8b1;color:white;}
+  .btn-hard{background:#f59e0b;color:white;}
+  .btn-easy{background:#3b82f6;color:white;}
+  .btn-edit{background:#06b6d4;color:white;}
+  .btn-del{background:#ef4444;color:white;}
+  .btn-export{background:#16a34a;color:white;}
+  .btn-import{background:#14b8a6;color:white;}
+  .btn-filter{background:#eef2ff;color:#4f46e5;border:1px solid #ddd;}
+  .btn-filter.active{background:#4f46e5;color:#fff;border:1px solid #4f46e5;}
+  .btn-sync{background:#0071e3;color:white;/* 苹果蓝适配iCloud */}
+  .btn-upload{background:#7c3aed;color:white;}
+  .subject-row{padding:12px 8px;margin:8px 0;background:#fdfdfe;border-radius:8px;}
+  .due{color:#ef4444;font-weight:600;}
+  .normal{color:#647888;}
+  .filter-bar{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0;padding:8px;background:#f5f7fa;border-radius:10px;}
+  .empty-tip{color:#94a3b8;padding:16px;text-align:center;font-size:14px;}
+  .img-preview{width:100%;max-height:200px;object-fit:contain;border-radius:8px;margin:8px 0;border:1px solid #f1f5f9;}
+  .img-show{width:100%;max-height:150px;object-fit:contain;border-radius:6px;margin:6px 0;}
+  .upload-area{display:flex;align-items:center;gap:8px;margin:8px 0;}
+  #imgFile,#importFile{display:none;}
+  .sync-tip{font-size:12px;color:#0071e3;text-align:center;margin:4px 0;}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="sync-tip">🍎 苹果设备专属 | iCloud Drive同步 + 本地永久保存 | 支持图文知识点</div>
+  <div class="card">
+    <h2>🧠 FSRS 复习助手（iCloud版）</h2>
+    <div class="top-actions">
+      <button class="btn-import" onclick="document.getElementById('importFile').click()">导入</button>
+      <button class="btn-export" onclick="exportCSV()">导出 CSV</button>
+      <button class="btn-sync" onclick="syncICloud()">🔄 同步iCloud</button>
+      <input type="file" id="importFile" accept=".csv,.xlsx,.xls" style="display:none">
+    </div>
+    <input id="subject" placeholder="科目：数学/英语/物理等">
+    <textarea id="content" placeholder="知识点文字（可搭配图片）"></textarea>
+    <div class="upload-area">
+      <button class="btn-upload" onclick="document.getElementById('imgFile').click()">📷 上传图片</button>
+      <span id="imgTip">未选择图片</span>
+      <input type="file" id="imgFile" accept="image/*" style="display:none">
+    </div>
+    <img id="previewImg" class="img-preview" src="" alt="图片预览" style="display:none">
+    <button class="btn-primary" onclick="addItem()">添加知识点</button>
+  </div>
+
+  <div class="card">
+    <h3>📅 今日待复习</h3>
+    <div class="filter-bar" id="dueFilterBar"></div>
+    <div id="dueList"></div>
+  </div>
+
+  <div class="card">
+    <h3>📚 全部知识点</h3>
+    <div class="filter-bar" id="allFilterBar"></div>
+    <div id="allList"></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script>
+// ====================== 配置（iCloud版）======================
+const STORAGE_KEY = "fsrs_local_data"; // 本地localStorage标识
+const ICLD_FILE_NAME = "fsrs-bella-data.json"; // iCloud同步文件名
+const ICLD_FOLDER = "FSRS复习助手"; // iCloud Drive中存储的文件夹名
+let dataList = [];
+let dueFilter = "all", allFilter = "all";
+let tempImgBase64 = "";
+
+// ====================== 本地localStorage操作（保留）======================
+function loadLocal() {
+  try {
+    const s = localStorage.getItem(STORAGE_KEY);
+    if (s) dataList = JSON.parse(s);
+  } catch (e) {console.log("本地数据加载失败：", e);}
+}
+function saveLocal() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(dataList));
+}
+
+// ====================== 核心：iCloud Drive文件读写（苹果设备专属）======================
+// 1. 选择iCloud Drive文件夹并创建专属目录
+async function selectICloudFolder() {
+  if (!window.showOpenFilePicker) {
+    alert("❌ 非苹果设备/浏览器不支持iCloud Drive操作！\n仅支持Mac/iOS/iPadOS的Safari/Chrome浏览器");
+    return null;
+  }
+  try {
+    // 打开文件夹选择器，选择iCloud Drive根目录
+    const [folderHandle] = await window.showOpenFilePicker({
+      type: "folder",
+      multiple: false,
+      startIn: "icloudDrive"
+    });
+    // 创建专属文件夹（FSRS复习助手）
+    const fsrsFolder = await folderHandle.getDirectoryHandle(ICLD_FOLDER, { create: true });
+    localStorage.setItem("icloud_folder_handle", JSON.stringify(await fsrsFolder.resolve()));
+    return fsrsFolder;
+  } catch (e) {
+    alert("iCloud文件夹选择取消/失败：" + e.message);
+    return null;
+  }
+}
+
+// 2. 获取iCloud专属文件夹句柄
+async function getICloudFolder() {
+  if (!window.showOpenFilePicker) return null;
+  const resolvePath = localStorage.getItem("icloud_folder_handle");
+  if (!resolvePath) return await selectICloudFolder();
+  try {
+    const folderHandle = await window.showOpenFilePicker({
+      type: "folder",
+      multiple: false,
+      startIn: "icloudDrive"
+    }).then(res => res[0]);
+    return await folderHandle.getDirectoryHandle(ICLD_FOLDER, { create: true });
+  } catch (e) {
+    return await selectICloudFolder();
+  }
+}
+
+// 3. 从iCloud加载数据
+async function loadICloud() {
+  const folder = await getICloudFolder();
+  if (!folder) return [];
+  try {
+    // 获取文件句柄
+    const fileHandle = await folder.getFileHandle(ICLD_FILE_NAME, { create: false });
+    const file = await fileHandle.getFile();
+    const content = await file.text();
+    return JSON.parse(content) || [];
+  } catch (e) {
+    console.log("iCloud无历史数据，将创建新文件：", e);
+    return [];
+  }
+}
+
+// 4. 保存数据到iCloud
+async function saveICloud(data) {
+  const folder = await getICloudFolder();
+  if (!folder) return false;
+  try {
+    // 创建/覆盖文件
+    const fileHandle = await folder.getFileHandle(ICLD_FILE_NAME, { create: true });
+    const writable = await fileHandle.createWritable();
+    await writable.write(JSON.stringify(data, null, 2));
+    await writable.close();
+    return true;
+  } catch (e) {
+    alert("保存到iCloud失败：" + e.message);
+    return false;
+  }
+}
+
+// 5. 合并iCloud和本地数据（最新数据优先）
+function mergeICloudAndLocal(icloudData, localData) {
+  const map = new Map();
+  // 先加本地数据，再加iCloud数据（iCloud覆盖本地，保证云端最新）
+  [...localData, ...icloudData].forEach(it => {
+    const key = `${it.subject}|${it.content}|${it.img ? it.img.slice(0, 50) : ''}`;
+    map.set(key, it);
+  });
+  return Array.from(map.values());
+}
+
+// ====================== 对外暴露：iCloud同步按钮核心方法======================
+async function syncICloud() {
+  if (!window.showOpenFilePicker) {
+    alert("❌ 仅支持苹果设备（Mac/iOS/iPadOS）的Safari/Chrome浏览器使用iCloud同步！");
+    return;
+  }
+  try {
+    const icloudData = await loadICloud(); // 加载iCloud数据
+    const mergedData = mergeICloudAndLocal(icloudData, dataList); // 合并数据
+    const isSaved = await saveICloud(mergedData); // 保存合并后的数据到iCloud
+    if (isSaved) {
+      dataList = mergedData;
+      saveLocal(); // 同步到本地
+      render();
+      alert(`✅ iCloud同步成功！\n当前总知识点：${dataList.length} 条\n（已同步到iCloud Drive/${ICLD_FOLDER}目录）`);
+    }
+  } catch (e) {
+    alert("iCloud同步异常：" + e.message);
+  }
+}
+
+// ====================== 图片上传/预览（保留原逻辑）======================
+document.getElementById('imgFile').onchange = function(e) {
+  const file = e.target.files[0];
+  if (!file || !file.type.startsWith('image/')) {
+    alert("请选择有效的图片文件！");
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = function(ev) {
+    tempImgBase64 = ev.target.result;
+    document.getElementById('previewImg').src = tempImgBase64;
+    document.getElementById('previewImg').style.display = "block";
+    document.getElementById('imgTip').innerText = "已选择图片：" + file.name;
+  };
+  reader.readAsDataURL(file);
+};
+
+// ====================== 基础功能：增删改查/复习（保留原逻辑）======================
+function now() { return Math.floor(Date.now() / 86400000); }
+function addItem() {
+  const sub = document.getElementById('subject').value.trim();
+  const cnt = document.getElementById('content').value.trim();
+  if (!sub || !cnt) return alert("请填写科目和知识点文字！");
+  dataList.push({ subject: sub, content: cnt, due: now()+1, lastDays:0, img: tempImgBase64 });
+  // 重置表单
+  document.getElementById('subject').value = '';
+  document.getElementById('content').value = '';
+  document.getElementById('imgTip').innerText = "未选择图片";
+  document.getElementById('previewImg').src = "";
+  document.getElementById('previewImg').style.display = "none";
+  tempImgBase64 = "";
+  saveLocal();
+  render();
+}
+function review(idx, grade) {
+  const it = dataList[idx];
+  it.lastDays = it.lastDays || 0;
+  const next = Math.max(1, Math.round(it.lastDays * (grade === 2 ? 1.5 : grade === 3 ? 2 : 3)));
+  it.due = now() + next;
+  it.lastDays = next;
+  saveLocal();
+  render();
+}
+function editItem(idx) {
+  const it = dataList[idx];
+  const s = prompt("修改科目", it.subject);
+  const c = prompt("修改知识点文字", it.content);
+  if (s != null && c != null) {
+    it.subject = s.trim();
+    it.content = c.trim();
+    if (confirm("是否重新上传图片？\n（点击确定将清空原有图片，重新选择）")) {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      input.onchange = function(e) {
+        const file = e.target.files[0];
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = function(ev) {
+            it.img = ev.target.result;
+            saveLocal();
+            render();
+          };
+          reader.readAsDataURL(file);
+        }
+      };
+      input.click();
+    }
+    saveLocal();
+    render();
+  }
+}
+function deleteItem(idx) {
+  if (confirm("确定删除该知识点（含图片）？")) {
+    dataList.splice(idx, 1);
+    saveLocal();
+    render();
+  }
+}
+
+// ====================== 科目筛选/渲染（保留原逻辑）======================
+function renderFilterBar(containerId, activeFilter, onFilterChange) {
+  const container = document.getElementById(containerId);
+  const subjects = [...new Set(dataList.map(it => it.subject || "未分类"))].sort();
+  let html = `<button class="btn-filter ${activeFilter === 'all' ? 'active' : ''}" onclick="${onFilterChange}('all')">全部</button>`;
+  subjects.forEach(sub => {
+    html += `<button class="btn-filter ${activeFilter === sub ? 'active' : ''}" onclick="${onFilterChange}('${sub}')">${sub}</button>`;
+  });
+  container.innerHTML = subjects.length === 0 ? '<div class="empty-tip">暂无科目，先添加知识点吧</div>' : html;
+}
+function changeDueFilter(sub) { dueFilter = sub; render(); }
+function changeAllFilter(sub) { allFilter = sub; render(); }
+function render() {
+  const today = now();
+  renderFilterBar("dueFilterBar", dueFilter, "changeDueFilter");
+  renderFilterBar("allFilterBar", allFilter, "changeAllFilter");
+  const dueData = dataList.filter(it => it.due <= today);
+  const filteredDueData = dueFilter === 'all' ? dueData : dueData.filter(it => (it.subject || "未分类") === dueFilter);
+  const filteredAllData = allFilter === 'all' ? dataList : dataList.filter(it => (it.subject || "未分类") === allFilter);
+  renderList(document.getElementById("dueList"), filteredDueData, true);
+  renderList(document.getElementById("allList"), filteredAllData, false);
+}
+function renderList(el, list, showReview) {
+  let html = "";
+  if (list.length === 0) {
+    html = '<div class="empty-tip">暂无知识点</div>';
+    el.innerHTML = html;
+    return;
+  }
+  const groups = {};
+  list.forEach((it, idx) => {
+    const k = it.subject || "未分类";
+    if (!groups[k]) groups[k] = [];
+    groups[k].push({ it, idx: dataList.findIndex(d => d.content === it.content && d.subject === it.subject) });
+  });
+  Object.keys(groups).sort().forEach(sub => {
+    html += `<div class="subject-group">📁 ${sub} (${groups[sub].length}条)</div>`;
+    groups[sub].forEach(({ it, idx }) => {
+      const dueTxt = it.due <= now() ? `<span class="due">今天复习</span>` : `${it.due - now()} 天后`;
+      const btns = showReview ? `<button class="btn-hard" onclick="review(${idx},2)">模糊</button><button class="btn-review" onclick="review(${idx},3)">记得</button><button class="btn-easy" onclick="review(${idx},4)">熟练</button>` : "";
+      const imgHtml = it.img ? `<img src="${it.img}" class="img-show" alt="知识点图片">` : "";
+      html += `<div class="subject-row"><div style="margin-bottom:6px;">${it.content}</div>${imgHtml}<div style="font-size:14px;" class="normal">${dueTxt}</div><div style="margin-top:8px;">${btns}<button class="btn-edit" onclick="editItem(${idx})">修改</button><button class="btn-del" onclick="deleteItem(${idx})">删除</button></div></div>`;
+    });
+  });
+  el.innerHTML = html;
+}
+
+// ====================== 导入/导出（保留原逻辑）======================
+document.getElementById('importFile').onchange = e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const wb = XLSX.read(ev.target.result, { type: 'array' });
+      const json = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 });
+      let added = 0;
+      for (let i = 1; i < json.length; i++) {
+        const row = json[i];
+        const sub = (row[0] || "").trim();
+        const cnt = (row[1] || "").trim();
+        if (sub && cnt) {
+          dataList.push({ subject: sub, content: cnt, due: now()+1, lastDays:0, img: "" });
+          added++;
+        }
+      }
+      saveLocal();
+      render();
+      alert(`导入成功：${added} 条（CSV仅导入文字，图片需手动添加）`);
+    } catch (err) {
+      alert("导入失败：" + err.message);
+    }
+    e.target.value = "";
+  };
+  reader.readAsArrayBuffer(file);
+};
+function exportCSV() {
+  const rows = [["科目", "知识点"]];
+  dataList.forEach(it => rows.push([it.subject, it.content]));
+  const csv = XLSX.utils.sheet_to_csv(XLSX.utils.aoa_to_sheet(rows));
+  const blob = new Blob([new Uint8Array([0xEF,0xBB,0xBF]), csv], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "FSRS知识点.csv";
+  a.click();
+}
+
+// ====================== 初始化：加载本地数据+渲染======================
+loadLocal();
+render();
+</script>
+</body>
+</html>
